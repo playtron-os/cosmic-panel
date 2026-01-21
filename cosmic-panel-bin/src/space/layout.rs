@@ -456,7 +456,9 @@ impl PanelSpace {
             windows_center.iter().map(|e| map_fn(e, anchor, Alignment::Center, applet_padding));
         let center_sum_scaled = center
             .clone()
-            .map(|(_, _, _, _, suggested_length, padding)| suggested_length - padding)
+            .map(|(_, _, _, _, suggested_length, padding)| {
+                suggested_length - padding
+            })
             .sum::<i32>() as f64
             * self.scale
             + spacing_scaled * windows_center.len().saturating_sub(1) as f64;
@@ -567,9 +569,18 @@ impl PanelSpace {
             - right_sum
             - padding_u32 as f64;
 
-        let one_third = (layer_major as f64 - (spacing_u32 * num_lists.saturating_sub(1)) as f64)
-            / (3.min(num_lists) as f64);
-        let one_half = layer_major as f64 / (2.min(num_lists) as f64);
+        // Prevent division by zero when there are no windows
+        let one_third = if num_lists == 0 {
+            layer_major as f64
+        } else {
+            (layer_major as f64 - (spacing_u32 * num_lists.saturating_sub(1)) as f64)
+                / (3.min(num_lists) as f64)
+        };
+        let one_half = if num_lists == 0 {
+            layer_major as f64
+        } else {
+            layer_major as f64 / (2.min(num_lists) as f64)
+        };
         let larger_side = left_sum.max(right_sum);
         let larger_side = if left_overflow_button.is_some() || right_overflow_button.is_some() {
             larger_side.max(container_length as f64 / 3.)
@@ -920,25 +931,28 @@ impl PanelSpace {
             let Some(output) = self.output.as_ref().map(|o| o.1.clone()) else {
                 bail!("output missing");
             };
+            // Use effective anchor gap for positioning - when anchor_gap is disabled, no offset
+            let effective_gap = self.config.get_effective_anchor_gap() as f32;
             let mut loc = match self.config.anchor {
                 PanelAnchor::Left => [
-                    self.config.margin as f32 + self.anchor_gap as f32,
+                    effective_gap,
                     container_lengthwise_pos as f32,
                 ],
                 PanelAnchor::Right => [-self.anchor_gap as f32, container_lengthwise_pos as f32],
                 PanelAnchor::Bottom => [container_lengthwise_pos as f32, -self.anchor_gap as f32],
                 PanelAnchor::Top => [
                     container_lengthwise_pos as f32,
-                    self.config.margin as f32 + self.anchor_gap as f32,
+                    effective_gap,
                 ],
             };
 
             let border_radius = self.border_radius().min(w as u32).min(h as u32) as f32 / 2.;
+            // When gap is 0, panel is flush against edge - no border radius needed
             let radius = match (self.config.anchor, self.gap()) {
-                (PanelAnchor::Right, 0) => [border_radius, 0., 0., border_radius],
-                (PanelAnchor::Left, 0) => [0., border_radius, border_radius, 0.],
-                (PanelAnchor::Bottom, 0) => [border_radius, border_radius, 0., 0.],
-                (PanelAnchor::Top, 0) => [0., 0., border_radius, border_radius],
+                (PanelAnchor::Right, 0) => [0., 0., 0., 0.],
+                (PanelAnchor::Left, 0) => [0., 0., 0., 0.],
+                (PanelAnchor::Bottom, 0) => [0., 0., 0., 0.],
+                (PanelAnchor::Top, 0) => [0., 0., 0., 0.],
                 _ => [border_radius, border_radius, border_radius, border_radius],
             };
 
@@ -958,11 +972,17 @@ impl PanelSpace {
                     h -= end_overlap - container_lengthwise_pos;
                 }
             }
+            // Only subtract margin when anchor_gap is enabled (panel floats away from edge)
+            let effective_margin = self.config.get_effective_anchor_gap() as i32;
             if self.config.is_horizontal() {
-                h -= self.config.margin as i32;
+                h -= effective_margin;
             } else {
-                w -= self.config.margin as i32;
+                w -= effective_margin;
             }
+            
+            // Guard against negative or zero dimensions - skip background creation
+            if w <= 0 || h <= 0 {
+            } else {
             let bg = background_element(
                 Id::new("panel_bg"),
                 w,
@@ -983,6 +1003,7 @@ impl PanelSpace {
                 false,
             );
             self.is_background_dirty = false;
+            } // end else for valid dimensions
         }
         input_region.subtract(0, 0, i32::MAX, i32::MAX);
         let anim_gap = self.anchor_gap;

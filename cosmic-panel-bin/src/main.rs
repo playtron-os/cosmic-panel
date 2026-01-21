@@ -191,6 +191,9 @@ fn main() -> Result<()> {
     std::thread::spawn(move || -> anyhow::Result<()> {
         let rt = runtime::Builder::new_current_thread().enable_all().build()?;
         let mut process_ids: HashMap<String, Vec<ProcessKey>> = HashMap::new();
+        // Track if notifications_conn was already attempted - can only call it once per process
+        // because it consumes the FD from the environment variable
+        let mut notifications_conn_attempted = false;
 
         rt.block_on(async move {
             let process_manager = ProcessManager::new().await;
@@ -201,11 +204,18 @@ fn main() -> Result<()> {
                 .await;
             let _ = process_manager.set_max_restarts(999999).await;
 
+            notifications_conn_attempted = true;
             let mut notifications_proxy =
                 match tokio::time::timeout(Duration::from_secs(5), notifications_conn()).await {
-                    Ok(Ok(p)) => Some(p),
-                    _ => {
-                        error!("Failed to connect to the notifications daemon.");
+                    Ok(Ok(p)) => {
+                        Some(p)
+                    },
+                    Ok(Err(e)) => {
+                        error!("Failed to connect to the notifications daemon: {}", e);
+                        None
+                    },
+                    Err(_) => {
+                        error!("Failed to connect to the notifications daemon: timeout");
                         None
                     },
                 };
@@ -226,20 +236,15 @@ fn main() -> Result<()> {
                         mut fds,
                     ) => {
                         let Some(proxy) = notifications_proxy.as_mut() else {
-                            notifications_proxy = match tokio::time::timeout(
-                                Duration::from_secs(1),
-                                notifications_conn(),
-                            )
-                            .await
-                            {
-                                Ok(Ok(p)) => Some(p),
-                                _ => {
-                                    error!("Failed to connect to the notifications daemon",);
-                                    None
-                                },
-                            };
-                            warn!("Can't start notifications applet without a connection");
-                            continue;
+                            // CRITICAL: Do NOT call notifications_conn() again!
+                            // The FD from the environment variable was already consumed
+                            // by the first call. Calling it again would try to use
+                            // a stale/reused FD number, causing corruption.
+                            // Instead, log the error and let cosmic-session restart us
+                            // with a fresh FD.
+                            error!("Cannot start notifications applet: notifications_conn was already attempted and failed. FD is no longer valid.");
+                            // Exit the process so cosmic-session can restart us with a fresh FD
+                            std::process::exit(1);
                         };
                         info!("Getting fd for notifications applet");
                         let notif_fd = match tokio::time::timeout(
